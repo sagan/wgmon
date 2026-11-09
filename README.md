@@ -63,7 +63,36 @@ wgmon --hook tc --dev eth0
 ```
 
 Requires root (`CAP_BPF`/`CAP_NET_ADMIN`) or an equivalent privilege
-setup, and `clang` + `libelf-dev` at build time.
+setup, and `clang` (≥ 8) + `libelf-dev`/`zlib1g-dev` at build time
+(the `vendored` feature builds libbpf/libelf/zlib from source instead,
+so only the autotools for the vendored elfutils build are required).
+
+## Cross compilation
+
+Static musl binaries are built with [cross](https://crates.io/crates/cross):
+
+```sh
+cargo install cross   # or download a release binary
+./build.sh            # or individually:
+cross build --release --target x86_64-unknown-linux-musl
+cross build --release --target aarch64-unknown-linux-musl
+cross +nightly build --release -Z build-std=std,core,alloc --target mipsel-unknown-linux-musl
+```
+
+* `Cross.toml` customizes the cross images: a pre-build installs clang
+  and the autotools, and builds the musl compatibility libraries
+  `argp-standalone`, `musl-fts` and `musl-obstack` for the target
+  (musl does not provide `argp(3)`, `fts(3)` or obstack, but the
+  vendored elfutils build requires them).
+* `.cargo/config.toml` carries target-specific link flags needed to
+  produce fully static binaries on aarch64 and mipsel.
+* `mipsel-unknown-linux-musl` is a tier-3 target: the Rust toolchain
+  ships no prebuilt std for it, so the binary is built from source with
+  a nightly toolchain (build-std). All other targets use the stable
+  toolchain with the prebuilt musl std.
+* A fresh-tag release workflow (`.github/workflows/release.yml`) runs
+  exactly these steps on GitHub Actions and publishes the resulting
+  binaries to GitHub Releases.
 
 ## Tuning
 

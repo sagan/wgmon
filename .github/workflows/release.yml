@@ -1,0 +1,99 @@
+name: Release
+
+# Tag a release with e.g. `git tag v0.2.0 && git push origin v0.2.0`.
+# Tags matching "v*" build and publish the cross-compiled binaries to
+# GitHub Releases. Manual dispatch is enabled for testing the pipeline.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            toolchain: stable
+            extra_args: ""
+            components: ""
+          - target: aarch64-unknown-linux-musl
+            toolchain: stable
+            extra_args: ""
+            components: ""
+          # mipsel-unknown-linux-musl is a tier-3 target: the Rust
+          # toolchain has no prebuilt std for it, so it must be built
+          # from source with a nightly toolchain (see Cross.toml).
+          - target: mipsel-unknown-linux-musl
+            toolchain: nightly
+            extra_args: "-Z build-std=std,core,alloc"
+            components: "rust-src"
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust (via rustup)
+        run: |
+          rustup toolchain install ${{ matrix.toolchain }}
+          rustup default ${{ matrix.toolchain }}
+          rustup target add --toolchain ${{ matrix.toolchain }} ${{ matrix.target }} || true
+          if [ -n "${{ matrix.components }}" ]; then
+            rustup component add ${{ matrix.components }} --toolchain ${{ matrix.toolchain }}
+          fi
+          rustup show
+
+      - name: Install cross
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl -fsSL -o /tmp/cross.tar.gz \
+            https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-gnu.tar.gz
+          tar xzf /tmp/cross.tar.gz -C "$HOME/.cargo/bin"
+          cross --version
+
+      - name: Build release binary
+        run: |
+          mkdir -p dist
+          cross +${{ matrix.toolchain }} build --release \
+            --target ${{ matrix.target }} ${{ matrix.extra_args }}
+          cp "target/${{ matrix.target }}/release/wgmon" "dist/wgmon-${{ matrix.target }}"
+          "$HOME/.cargo/bin/cargo" --version
+          file "dist/wgmon-${{ matrix.target }}" || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wgmon-${{ matrix.target }}
+          path: dist/wgmon-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: artifacts/*

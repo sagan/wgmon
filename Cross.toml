@@ -1,0 +1,149 @@
+# cross configuration (https://github.com/cross-rs/cross)
+#
+# Build all release targets with:
+#     cross build --release --target x86_64-unknown-linux-musl
+#     cross build --release --target aarch64-unknown-linux-musl
+#     cross +nightly build --release -Z build-std=std,core,alloc --target mipsel-unknown-linux-musl
+#
+# wgmon links a vendored, statically built libbpf/libelf/zlib into the
+# binary ( the `vendored` feature in Cargo.toml), so no target system
+# libraries are needed. A few *build-time* things must be installed in
+# the cross image instead:
+#
+#   * clang >= 8 to compile the BPF sources: libbpf-cargo invokes clang,
+#     and the kprobe program uses __builtin_preserve_access_index (CO-RE),
+#     which only exists in clang >= 8.
+#   * autotools for the vendored elfutils build.
+#   * argp/fts/obstack for the musl target: musl libc does not provide
+#     any of them, but elfutils' configure hard-requires argp_parse,
+#     fts_close and _obstack_free. The pre-build steps build
+#     argp-standalone (ericonr fork), musl-fts and musl-obstack (the
+#     standalone versions of these GNU/BSD facilities, as used by
+#     Alpine/Gentoo for musl) for the target and install them into the
+#     musl sysroot.
+#
+# Sources (pinned commits):
+#   * ericonr/argp-standalone  @ 743004c68e7358fb9cd4737450f2d9a34076aadf
+#   * void-linux/musl-fts      @ 0bde52df588e8969879a2cae51c3a4774ec62472
+#   * void-linux/musl-obstack  @ 362629706cb24a68b5e02876f0250df95e2e3f8d
+#
+# mipsel notes: the Rust toolchain ships no prebuilt std for
+# mipsel-unknown-linux-musl (tier 3 target), so that target is built
+# from source (nightly + build-std, see the `build-std` key below and
+# `build.sh`). The extra pre-build step creates an empty libunwind.a:
+# rustc always links `-lunwind` for musl targets, but the mipsel musl
+# sysroot does not ship libunwind (musl provides unwinding symbols via
+# libgcc_eh, which is linked by the rustflags in .cargo/config.toml).
+
+[target.x86_64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"
+pre-build = [
+    """
+    export DEBIAN_FRONTEND=noninteractive
+    export CC=x86_64-unknown-linux-musl-gcc
+    export SYSROOT=/x-tools/x86_64-unknown-linux-musl/x86_64-unknown-linux-musl/sysroot
+    apt-get update && apt-get -y --no-install-recommends install autoconf autopoint automake libtool flex bison gawk clang make pkg-config curl &&
+    mkdir -p $SYSROOT/usr/include $SYSROOT/usr/lib &&
+    cd /tmp && curl -fsSL -o argp.tar.gz https://github.com/ericonr/argp-standalone/archive/743004c68e7358fb9cd4737450f2d9a34076aadf.tar.gz &&
+    tar xzf argp.tar.gz &&
+    cd argp-standalone-743004c68e7358fb9cd4737450f2d9a34076aadf &&
+    autoreconf -i >/dev/null 2>&1 &&
+    ./configure --prefix=$SYSROOT/usr >/dev/null 2>&1 &&
+    make -j4 >/dev/null 2>&1 &&
+    cp argp.h $SYSROOT/usr/include/ &&
+    cp libargp.a $SYSROOT/usr/lib/ &&
+    cd /tmp && curl -fsSL -o fts.tar.gz https://github.com/void-linux/musl-fts/archive/0bde52df588e8969879a2cae51c3a4774ec62472.tar.gz &&
+    tar xzf fts.tar.gz &&
+    cd musl-fts-0bde52df588e8969879a2cae51c3a4774ec62472 &&
+    ./bootstrap.sh >/dev/null 2>&1 &&
+    ./configure --prefix=$SYSROOT/usr >/dev/null 2>&1 &&
+    make -j4 >/dev/null 2>&1 &&
+    make install >/dev/null 2>&1 &&
+    rm -rf /tmp/musl-fts-* /tmp/fts.tar.gz &&
+    cd /tmp && curl -fsSL -o obstack.tar.gz https://github.com/void-linux/musl-obstack/archive/362629706cb24a68b5e02876f0250df95e2e3f8d.tar.gz &&
+    tar xzf obstack.tar.gz &&
+    cd musl-obstack-362629706cb24a68b5e02876f0250df95e2e3f8d &&
+    ./bootstrap.sh >/dev/null 2>&1 &&
+    ./configure --prefix=$SYSROOT/usr >/dev/null 2>&1 &&
+    make -j4 >/dev/null 2>&1 &&
+    make install >/dev/null 2>&1 &&
+    rm -rf /tmp/musl-obstack-* /tmp/obstack.tar.gz /tmp/argp-standalone-* /tmp/argp.tar.gz &&
+    test -f $SYSROOT/usr/include/argp.h && test -f $SYSROOT/usr/include/fts.h && test -f $SYSROOT/usr/include/obstack.h && echo WGMON_MUSL_COMPAT_OK
+    """,
+]
+
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
+pre-build = [
+    """
+    export DEBIAN_FRONTEND=noninteractive
+    export CC=aarch64-unknown-linux-musl-gcc
+    export SYSROOT=/x-tools/aarch64-unknown-linux-musl/aarch64-unknown-linux-musl/sysroot
+    apt-get update && apt-get -y --no-install-recommends install autoconf autopoint automake libtool flex bison gawk clang make pkg-config curl &&
+    mkdir -p $SYSROOT/usr/include $SYSROOT/usr/lib &&
+    cd /tmp && curl -fsSL -o argp.tar.gz https://github.com/ericonr/argp-standalone/archive/743004c68e7358fb9cd4737450f2d9a34076aadf.tar.gz &&
+    tar xzf argp.tar.gz &&
+    cd argp-standalone-743004c68e7358fb9cd4737450f2d9a34076aadf &&
+    autoreconf -i >/dev/null 2>&1 &&
+    ./configure --host=aarch64-linux-musl --prefix=$SYSROOT/usr >/dev/null 2>&1 &&
+    make -j4 >/dev/null 2>&1 &&
+    cp argp.h $SYSROOT/usr/include/ &&
+    cp libargp.a $SYSROOT/usr/lib/ &&
+    cd /tmp && curl -fsSL -o fts.tar.gz https://github.com/void-linux/musl-fts/archive/0bde52df588e8969879a2cae51c3a4774ec62472.tar.gz &&
+    tar xzf fts.tar.gz &&
+    cd musl-fts-0bde52df588e8969879a2cae51c3a4774ec62472 &&
+    ./bootstrap.sh >/dev/null 2>&1 &&
+    ./configure --host=aarch64-linux-musl --prefix=$SYSROOT/usr >/dev/null 2>&1 &&
+    make -j4 >/dev/null 2>&1 &&
+    make install >/dev/null 2>&1 &&
+    rm -rf /tmp/musl-fts-* /tmp/fts.tar.gz &&
+    cd /tmp && curl -fsSL -o obstack.tar.gz https://github.com/void-linux/musl-obstack/archive/362629706cb24a68b5e02876f0250df95e2e3f8d.tar.gz &&
+    tar xzf obstack.tar.gz &&
+    cd musl-obstack-362629706cb24a68b5e02876f0250df95e2e3f8d &&
+    ./bootstrap.sh >/dev/null 2>&1 &&
+    ./configure --host=aarch64-linux-musl --prefix=$SYSROOT/usr >/dev/null 2>&1 &&
+    make -j4 >/dev/null 2>&1 &&
+    make install >/dev/null 2>&1 &&
+    rm -rf /tmp/musl-obstack-* /tmp/obstack.tar.gz /tmp/argp-standalone-* /tmp/argp.tar.gz &&
+    test -f $SYSROOT/usr/include/argp.h && test -f $SYSROOT/usr/include/fts.h && test -f $SYSROOT/usr/include/obstack.h && echo WGMON_MUSL_COMPAT_OK
+    """,
+]
+
+[target.mipsel-unknown-linux-musl]
+image = "ghcr.io/cross-rs/mipsel-unknown-linux-musl:main"
+build-std = true
+pre-build = [
+    """
+    export DEBIAN_FRONTEND=noninteractive
+    export CC=mipsel-linux-muslsf-gcc
+    export SYSROOT=/usr/local/mipsel-linux-muslsf
+    apt-get update && apt-get -y --no-install-recommends install autoconf autopoint automake libtool flex bison gawk clang make pkg-config curl &&
+    mkdir -p $SYSROOT/include $SYSROOT/lib &&
+    ar rcs $SYSROOT/lib/libunwind.a &&
+    cd /tmp && curl -fsSL -o argp.tar.gz https://github.com/ericonr/argp-standalone/archive/743004c68e7358fb9cd4737450f2d9a34076aadf.tar.gz &&
+    tar xzf argp.tar.gz &&
+    cd argp-standalone-743004c68e7358fb9cd4737450f2d9a34076aadf &&
+    autoreconf -i >/dev/null 2>&1 &&
+    ./configure --host=mipsel-linux-muslsf --prefix=$SYSROOT >/dev/null 2>&1 &&
+    make -j4 >/dev/null 2>&1 &&
+    cp argp.h $SYSROOT/include/ &&
+    cp libargp.a $SYSROOT/lib/ &&
+    cd /tmp && curl -fsSL -o fts.tar.gz https://github.com/void-linux/musl-fts/archive/0bde52df588e8969879a2cae51c3a4774ec62472.tar.gz &&
+    tar xzf fts.tar.gz &&
+    cd musl-fts-0bde52df588e8969879a2cae51c3a4774ec62472 &&
+    ./bootstrap.sh >/dev/null 2>&1 &&
+    ./configure --host=mipsel-linux-muslsf --prefix=$SYSROOT >/dev/null 2>&1 &&
+    make -j4 >/dev/null 2>&1 &&
+    make install >/dev/null 2>&1 &&
+    rm -rf /tmp/musl-fts-* /tmp/fts.tar.gz &&
+    cd /tmp && curl -fsSL -o obstack.tar.gz https://github.com/void-linux/musl-obstack/archive/362629706cb24a68b5e02876f0250df95e2e3f8d.tar.gz &&
+    tar xzf obstack.tar.gz &&
+    cd musl-obstack-362629706cb24a68b5e02876f0250df95e2e3f8d &&
+    ./bootstrap.sh >/dev/null 2>&1 &&
+    ./configure --host=mipsel-linux-muslsf --prefix=$SYSROOT >/dev/null 2>&1 &&
+    make -j4 >/dev/null 2>&1 &&
+    make install >/dev/null 2>&1 &&
+    rm -rf /tmp/musl-obstack-* /tmp/obstack.tar.gz /tmp/argp-standalone-* /tmp/argp.tar.gz &&
+    test -f $SYSROOT/include/argp.h && test -f $SYSROOT/include/fts.h && test -f $SYSROOT/include/obstack.h && echo WGMON_MUSL_COMPAT_OK
+    """,
+]

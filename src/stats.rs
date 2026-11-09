@@ -62,7 +62,9 @@ impl Key {
         }
         Ok(Key {
             port: u16::from_le_bytes([bytes[0], bytes[1]]),
-            receiver_index: u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]),
+            // struct stat_key is {u16 port, u16 pad, u32 receiver_index}:
+            // port @0..2, pad @2..4, receiver_index @4..8.
+            receiver_index: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
         })
     }
 }
@@ -345,5 +347,184 @@ impl Tracker {
             loss_valid: expected_total > 0 && sufficient,
             new_session: any_new,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_roundtrip_matches_bpf_layout() {
+        let key = Key {
+            port: 51822,
+            receiver_index: 0xdead_beef,
+        };
+        let bytes = key.to_bytes();
+        // Layout: u16 port, u16 pad, u32 receiver_index.
+        assert_eq!(&bytes[0..2], &51822u16.to_le_bytes());
+        assert_eq!(&bytes[2..4], &[0, 0]);
+        assert_eq!(&bytes[4..8], &0xdead_beef_u32.to_le_bytes());
+        assert_eq!(Key::from_bytes(&bytes).unwrap(), key);
+    }
+
+    #[test]
+    fn rekey_starts_new_baseline() {
+        let now = 10_000_000_000u64; // 10 s
+        let cfg = Config {
+            min_packets: 10,
+            ..Config::default()
+        };
+        let mut tracker = Tracker::new(0);
+
+        // Session 1: 100 packets, counter 1..=100.
+        let mut snap = HashMap::new();
+        snap.insert(
+            Key {
+                port: 51822,
+                receiver_index: 111,
+            },
+            Sample {
+                rx_packets: 100,
+                rx_bytes: 1000,
+                max_counter: 100,
+                min_counter: 1,
+                first_seen_ns: now,
+                last_seen_ns: now,
+            },
+        );
+        let r = tracker.step(now, &snap, 51822, &cfg);
+        assert!(r.new_session);
+        assert_eq!(r.expected, 0); // baseline only
+
+        // Next window: 20 more packets, no loss.
+        snap.get_mut(&Key {
+            port: 51822,
+            receiver_index: 111,
+        })
+        .unwrap()
+        .rx_packets = 120;
+        snap.get_mut(&Key {
+            port: 51822,
+            receiver_index: 111,
+        })
+        .unwrap()
+        .max_counter = 120;
+        let r = tracker.step(now + 2_000_000_000, &snap, 51822, &cfg);
+        assert_eq!(r.expected, 20);
+        assert_eq!(r.received, 20);
+        assert_eq!(r.loss, 0.0);
+
+        // Rekey: new receiver_index, counter restarts at 0.
+        snap.clear();
+        snap.insert(
+            Key {
+                port: 51822,
+                receiver_index: 222,
+            },
+            Sample {
+                rx_packets: 5,
+                rx_bytes: 50,
+                max_counter: 5,
+                min_counter: 1,
+                first_seen_ns: now + 4_000_000_000,
+                last_seen_ns: now + 4_000_000_000,
+            },
+        );
+        let r = tracker.step(now + 4_000_000_000, &snap, 51822, &cfg);
+        assert!(r.new_session);
+        assert_eq!(r.state, State::Idle); // baselining the new session
+
+        // Another 20 packets on the new session.
+        snap.get_mut(&Key {
+            port: 51822,
+            receiver_index: 222,
+        })
+        .unwrap()
+        .rx_packets = 25;
+        snap.get_mut(&Key {
+            port: 51822,
+            receiver_index: 222,
+        })
+        .unwrap()
+        .max_counter = 25;
+        let r = tracker.step(now + 6_000_000_000, &snap, 51822, &cfg);
+        assert_eq!(r.expected, 20);
+        assert_eq!(r.received, 20);
+    }
+
+    #[test]
+    fn reordering_is_loss_free() {
+        let now = 10_000_000_000u64;
+        let cfg = Config {
+            min_packets: 10,
+            ..Config::default()
+        };
+        let mut tracker = Tracker::new(0);
+        let mut snap = HashMap::new();
+        let key = Key {
+            port: 51822,
+            receiver_index: 7,
+        };
+        snap.insert(
+            key,
+            Sample {
+                rx_packets: 50,
+                rx_bytes: 0,
+                max_counter: 50,
+                min_counter: 1,
+                first_seen_ns: now,
+                last_seen_ns: now,
+            },
+        );
+        tracker.step(now, &snap, 51822, &cfg);
+
+        // Counters 51..=60 arrive reordered, plus a late 48 below the
+        // previous max: 11 received, max delta 10. Loss clamps to 0.
+        let s = snap.get_mut(&key).unwrap();
+        s.rx_packets = 61;
+        s.max_counter = 60;
+        let r = tracker.step(now + 5_000_000_000, &snap, 51822, &cfg);
+        assert_eq!(r.expected, 10);
+        assert_eq!(r.received, 11);
+        assert_eq!(r.loss, 0.0);
+        assert_eq!(r.lost, 0);
+    }
+
+    #[test]
+    fn true_loss_is_detected() {
+        let now = 10_000_000_000u64;
+        let cfg = Config {
+            min_packets: 10,
+            ..Config::default()
+        };
+        let mut tracker = Tracker::new(0);
+        let key = Key {
+            port: 51822,
+            receiver_index: 9,
+        };
+        let mut snap = HashMap::new();
+        snap.insert(
+            key,
+            Sample {
+                rx_packets: 50,
+                rx_bytes: 0,
+                max_counter: 50,
+                min_counter: 1,
+                first_seen_ns: now,
+                last_seen_ns: now,
+            },
+        );
+        tracker.step(now, &snap, 51822, &cfg);
+
+        // Counter jumps to 70 but only 15 packets arrive: 20 expected, 5 lost.
+        let s = snap.get_mut(&key).unwrap();
+        s.rx_packets = 65;
+        s.max_counter = 70;
+        let r = tracker.step(now + 5_000_000_000, &snap, 51822, &cfg);
+        assert_eq!(r.expected, 20);
+        assert_eq!(r.received, 15);
+        assert_eq!(r.lost, 5);
+        assert!((r.loss - 0.25).abs() < 1e-9);
     }
 }

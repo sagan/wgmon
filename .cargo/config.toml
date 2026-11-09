@@ -1,0 +1,31 @@
+# Cargo configuration for the cross-compiled musl targets.
+#
+# aarch64: the vendored libbpf C code calls __aarch64_ldadd4_sync (GCC
+# compiler-rt builtins), which rustc does not link automatically for the
+# musl target. Pull -lgcc in inside a link group so archive resolution
+# order cannot bite.
+#
+# mipsel: the Rust toolchain ships no prebuilt std for this tier-3 target
+# (it is built from source, see Cross.toml `build-std`), and rustc does
+# not use the self-contained musl runtime there. Force toolchain CRT
+# objects (`link-self-contained=no`), a static link (`+crt-static` +
+# the final `-Bstatic`, which this mipsel driver needs to prefer the
+# static archives), and libgcc_eh for the unwind tables via a link group.
+
+[target.aarch64-unknown-linux-musl]
+rustflags = [
+    "-C", "link-arg=-Wl,--start-group",
+    "-C", "link-arg=-lgcc",
+    "-C", "link-arg=-Wl,--end-group",
+]
+
+[target.mipsel-unknown-linux-musl]
+rustflags = [
+    "-C", "link-self-contained=no",
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=-Wl,-Bstatic",
+    "-C", "link-arg=-Wl,--start-group",
+    "-C", "link-arg=-lgcc_eh",
+    "-C", "link-arg=-lc",
+    "-C", "link-arg=-Wl,--end-group",
+]

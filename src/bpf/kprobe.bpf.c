@@ -34,11 +34,33 @@ struct pt_regs {
 		rax, rcx, rdx, rsi, rdi, orig_ax, rip, cs, flags, sp, ss;
 };
 #elif defined(__TARGET_ARCH_arm64)
+/* bpf_tracing.h casts the ctx to struct user_pt_regs on arm64. */
+struct user_pt_regs {
+	unsigned long regs[31];
+	unsigned long sp;
+	unsigned long pc;
+	unsigned long pstate;
+};
 struct pt_regs {
 	unsigned long regs[31];
 	unsigned long sp;
 	unsigned long pc;
 	unsigned long pstate;
+};
+#elif defined(__TARGET_ARCH_mips)
+/* mips32 (CONFIG_32BIT layout). Registers and fields are 32-bit here, so
+ * __u32 is used even though BPF is a 64-bit VM. PT_REGS_PARM1/2 become
+ * regs[4]/regs[5] on mips (a0/a1).
+ */
+struct pt_regs {
+	__u32 pad0[8];
+	__u32 regs[32];
+	__u32 cp0_status;
+	__u32 hi;
+	__u32 lo;
+	__u32 cp0_badvaddr;
+	__u32 cp0_cause;
+	__u32 cp0_epc;
 };
 #else
 #error "unsupported target architecture"
