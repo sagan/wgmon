@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 pub struct WgIface {
     pub name: String,
     pub port: u16,
+    pub fwmark: u32,
     /// Peer endpoint IPs seen on this interface (for tc auto-detection).
     pub endpoints: Vec<String>,
     pub has_peers: bool,
@@ -43,10 +44,17 @@ pub fn discover() -> Result<Vec<WgIface>> {
             // interface header: name, privkey, pubkey, listenport, fwmark
             5 => {
                 let port: u16 = f[3].parse().unwrap_or(0);
+                let fwmark_str = f[4].trim();
+                let fwmark: u32 = if let Some(hex) = fwmark_str.strip_prefix("0x").or_else(|| fwmark_str.strip_prefix("0X")) {
+                    u32::from_str_radix(hex, 16).unwrap_or(0)
+                } else {
+                    fwmark_str.parse().unwrap_or(0)
+                };
                 index.insert(f[0].to_string(), ifaces.len());
                 ifaces.push(WgIface {
                     name: f[0].to_string(),
                     port,
+                    fwmark,
                     endpoints: Vec::new(),
                     has_peers: false,
                 });
@@ -98,10 +106,14 @@ pub fn endpoint_ip(endpoint: &str) -> Option<String> {
 }
 
 /// Outgoing physical device for `dst_ip`, via the routing table.
-pub fn route_device(dst_ip: &str) -> Result<String> {
-    let out = Command::new("ip")
-        .args(["-o", "route", "get", dst_ip])
-        .output()?;
+/// When `fwmark` is non-zero, uses policy routing matching WireGuard's socket mark.
+pub fn route_device(dst_ip: &str, fwmark: u32) -> Result<String> {
+    let mut cmd = Command::new("ip");
+    cmd.args(["-o", "route", "get", dst_ip]);
+    if fwmark != 0 {
+        cmd.args(["mark", &format!("{fwmark:#x}")]);
+    }
+    let out = cmd.output()?;
     if !out.status.success() {
         bail!(
             "`ip route get {dst_ip}` failed: {}",
@@ -124,7 +136,7 @@ pub fn route_device(dst_ip: &str) -> Result<String> {
     bail!("could not determine outgoing device for {dst_ip}")
 }
 
-/// Physical devices to attach the tc fallback to.
+/// Physical devices to attach the tc / socket filter fallback to.
 pub fn tc_devices(ifaces: &[WgIface], forced: &[String]) -> Result<Vec<String>> {
     let mut devices: Vec<String> = Vec::new();
     if !forced.is_empty() {
@@ -136,14 +148,17 @@ pub fn tc_devices(ifaces: &[WgIface], forced: &[String]) -> Result<Vec<String>> 
         }
         return Ok(devices);
     }
+    let wg_names: HashSet<&str> = ifaces.iter().map(|i| i.name.as_str()).collect();
     for iface in ifaces {
         if iface.endpoints.is_empty() {
             continue;
         }
         for endpoint in &iface.endpoints {
-            match route_device(endpoint) {
+            match route_device(endpoint, iface.fwmark) {
                 Ok(dev) => {
-                    if !dev.is_empty() && !devices.contains(&dev) {
+                    // Do not bind to a WireGuard tunnel interface itself (it only carries
+                    // decrypted inner packets, not outer WireGuard UDP packets).
+                    if !dev.is_empty() && !wg_names.contains(dev.as_str()) && !devices.contains(&dev) {
                         devices.push(dev);
                     }
                 }

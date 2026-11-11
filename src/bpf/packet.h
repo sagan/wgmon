@@ -29,6 +29,19 @@ struct __sk_buff {
 	__u32 tc_classid;
 	__u32 data;
 	__u32 data_end;
+	__u32 napi_id;
+	__u32 family;
+	__u32 remote_ip4;
+	__u32 local_ip4;
+	__u32 remote_ip6[4];
+	__u32 local_ip6[4];
+	__u32 remote_port;
+	__u32 local_port;
+	__u32 data_meta;
+	__u64 flow_keys;
+	__u64 tstamp;
+	__u32 wire_len;
+	__u32 gso_segs;
 };
 
 static __always_inline int load_bytes(struct __sk_buff *skb, __u32 off,
@@ -122,10 +135,15 @@ static __always_inline int filter_packet(struct __sk_buff *skb)
 	if (WGMON_LE32(hdr.type) != 4)
 		return 0;
 
+	__u32 segs = skb->gso_segs;
+	if (segs == 0)
+		segs = 1;
+
 	return record_packet((__u16)((l4[2] << 8) | l4[3]),
 			     WGMON_LE32(hdr.receiver_index),
 			     WGMON_LE64(hdr.counter),
-			     (__u64)((l4[4] << 8) | l4[5]));
+			     (__u64)skb->len,
+			     segs);
 }
 
 #endif /* WGMON_PACKET_H */

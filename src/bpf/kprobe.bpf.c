@@ -95,7 +95,7 @@ static __always_inline int parse_and_record(void *skb_ptr, int hdr_off)
 
 	return record_packet(WGMON_BE16(dport_be),
 			     WGMON_LE32(hdr.receiver_index),
-			     WGMON_LE64(hdr.counter), bytes);
+			     WGMON_LE64(hdr.counter), bytes, 1);
 }
 
 SEC("kprobe/wg_packet_consume_data")

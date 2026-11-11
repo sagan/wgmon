@@ -25,7 +25,8 @@ struct {
 } ports SEC(".maps");
 
 static __always_inline int record_packet(__u16 port, __u32 receiver_index,
-					 __u64 counter, __u64 bytes)
+					 __u64 counter, __u64 bytes,
+					 __u32 segs)
 {
 	__u32 port_key;
 
@@ -41,6 +42,7 @@ static __always_inline int record_packet(__u16 port, __u32 receiver_index,
 		struct stat_val *v;
 		__u64 now;
 		__u64 old;
+		__u64 max_in_bundle;
 
 		key.port = port;
 		key.receiver_index = receiver_index;
@@ -63,20 +65,20 @@ static __always_inline int record_packet(__u16 port, __u32 receiver_index,
 		}
 
 		now = bpf_ktime_get_ns();
-		__sync_fetch_and_add(&v->rx_packets, 1);
+		__sync_fetch_and_add(&v->rx_packets, segs);
 		__sync_fetch_and_add(&v->rx_bytes, bytes);
 		if (!v->first_seen_ns)
 			v->first_seen_ns = now;
 		v->last_seen_ns = now;
 
-		/* Per-CPU slots are only ever touched by their own CPU, so a
-		 * plain store is race-free here. (A CAS retry loop makes the
-		 * verifier give up with "infinite loop detected"; it also
-		 * buys nothing because no other CPU shares this slot.)
+		/* For GRO aggregated packets, counter is the first packet's
+		 * monotonic counter; the bundle contains segs consecutive packets,
+		 * so the highest counter in this bundle is counter + segs - 1.
 		 */
+		max_in_bundle = counter + (segs - 1);
 		old = v->max_counter;
-		if (counter > old)
-			v->max_counter = counter;
+		if (max_in_bundle > old)
+			v->max_counter = max_in_bundle;
 
 		/* min_counter is diagnostic only. */
 		old = v->min_counter;
