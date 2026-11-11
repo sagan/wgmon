@@ -25,7 +25,8 @@ which counters arrive.
 | backend | hook | needs |
 |---|---|---|
 | `kprobe` (preferred) | `wg_packet_consume_data()` (after header validation; fallback `wg_packet_receive()`) | kernel BTF for `struct sk_buff` (CO-RE); the WireGuard module loaded |
-| `tc` | clsact ingress on a physical interface, matching the UDP destination port | nothing (parses packets with `bpf_skb_load_bytes`) |
+| `tc` | clsact ingress on a physical interface, matching the UDP destination port | `clsact` qdisc support (`sch_clsact`) |
+| `socket` | `AF_PACKET` socket filter attached via `SO_ATTACH_BPF` | nothing (works on standard kernels and embedded routers like OpenWrt without extra modules or BTF) |
 
 The listen port is used instead of `struct wg_device` to discover which
 interface a packet belongs to, so no kernel-internal WireGuard structs are
@@ -60,6 +61,9 @@ wgmon --interface wg_tokyo --once --format json
 
 # tc fallback on the physical NIC (no BTF needed)
 wgmon --hook tc --dev eth0
+
+# socket filter fallback (ideal for OpenWrt or kernels without BTF and without clsact)
+wgmon --hook socket
 ```
 
 Requires root (`CAP_BPF`/`CAP_NET_ADMIN`) or an equivalent privilege

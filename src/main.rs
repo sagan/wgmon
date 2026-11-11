@@ -16,11 +16,12 @@ use anyhow::{Context, Result};
 use render::{Config as RenderConfig, Format, Row};
 use stats::{Config as LossConfig, Tracker};
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
 enum Hook {
     Auto,
     Kprobe,
     Tc,
+    Socket,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
@@ -68,7 +69,8 @@ struct Args {
     no_color: bool,
 
     /// eBPF backend. `auto` prefers the kprobe on the WireGuard receive
-    /// path and falls back to tc ingress when the former is unavailable.
+    /// path, falls back to tc ingress, and then to an AF_PACKET socket
+    /// filter when tc clsact is unavailable (e.g. OpenWrt without extra modules).
     #[arg(long, value_enum, default_value_t = Hook::Auto)]
     hook: Hook,
 
@@ -76,7 +78,7 @@ struct Args {
     #[arg(long, value_enum, default_value_t = KprobeSymbol::Auto, hide = true)]
     kprobe_symbol: KprobeSymbol,
 
-    /// Physical interface(s) for the tc backend (repeatable).
+    /// Physical interface(s) for the tc and socket filter backends (repeatable).
     /// Default for `auto`: inferred from each peer's endpoint route.
     #[arg(long)]
     dev: Vec<String>,
@@ -121,6 +123,7 @@ impl From<Hook> for bpf::Hook {
             Hook::Auto => bpf::Hook::Auto,
             Hook::Kprobe => bpf::Hook::Kprobe,
             Hook::Tc => bpf::Hook::Tc,
+            Hook::Socket => bpf::Hook::Socket,
         }
     }
 }
@@ -163,13 +166,15 @@ fn main() -> Result<()> {
         );
     }
 
-    // ---- Physical devices for tc (only needed for the fallback) --------
-    let tc_ifindexes: Vec<i32> = match args.hook {
-        Hook::Tc | Hook::Auto => {
+    // ---- Physical devices for tc / socket filter -----------------------
+    let dev_ifindexes: Vec<i32> = match args.hook {
+        Hook::Tc | Hook::Socket | Hook::Auto => {
             let devs = match wg::tc_devices(&ifaces, &args.dev) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("wgmon: {e}");
+                    if args.hook == Hook::Tc {
+                        eprintln!("wgmon: {e}");
+                    }
                     Vec::new()
                 }
             };
@@ -188,13 +193,15 @@ fn main() -> Result<()> {
     // ---- Load the eBPF backend ------------------------------------------
     let mut open_object = MaybeUninit::uninit();
     let mut open_object_tc = MaybeUninit::uninit();
+    let mut open_object_sock = MaybeUninit::uninit();
     let hook: bpf::Hook = args.hook.into();
     let symbol: bpf::KprobeSymbol = args.kprobe_symbol.into();
     let backend = bpf::load(
         &mut open_object,
         &mut open_object_tc,
+        &mut open_object_sock,
         &hook,
-        &tc_ifindexes,
+        &dev_ifindexes,
         &ports,
         &symbol,
     )

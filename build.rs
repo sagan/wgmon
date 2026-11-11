@@ -4,11 +4,12 @@ use std::path::PathBuf;
 
 fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    for name in ["kprobe", "tc"] {
+    for name in ["kprobe", "tc", "sock"] {
         let src = format!("src/bpf/{name}.bpf.c");
         println!("cargo:rerun-if-changed={src}");
         println!("cargo:rerun-if-changed=src/bpf/common.h");
         println!("cargo:rerun-if-changed=src/bpf/types.h");
+        println!("cargo:rerun-if-changed=src/bpf/packet.h");
         SkeletonBuilder::new()
             .source(&src)
             .clang_args(["-Isrc/bpf"])
